@@ -4,6 +4,9 @@ import dynamic from 'next/dynamic';
 import { useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { css } from 'styled-components';
+import { fetchAPI } from '@/api';
+import { useEditorStore } from '@/features/docs/doc-editor/stores';
+
 
 import { Box, Icon } from '@/components';
 import { useCunninghamTheme } from '@/cunningham';
@@ -14,6 +17,7 @@ import { useResponsiveStore } from '@/stores';
 interface DocToolBoxProps {
   doc: Doc;
 }
+
 
 const DocToolBoxLicence = dynamic(() =>
   process.env.NEXT_PUBLIC_PUBLISH_AS_MIT === 'false'
@@ -33,6 +37,56 @@ export const DocToolBox = ({ doc }: DocToolBoxProps) => {
 
   const { isSmallMobile } = useResponsiveStore();
 
+  const { editor } = useEditorStore();
+
+
+  const handlePushClick = async () => {
+  
+    console.log('Push button clicked');
+    let documentId = null;
+    if (typeof window !== 'undefined') {
+      const pathSegments = window.location.pathname.split('/');
+      const docIndex = pathSegments.indexOf('docs');
+      if (docIndex !== -1 && docIndex < pathSegments.length - 1) {
+        documentId = pathSegments[docIndex + 1];
+        console.log('Extracted documentId from URL:', documentId);
+      } else {
+        console.error('Could not extract documentId from URL:', window.location.pathname);
+      }
+    } else {
+      console.error('Cannot access window.location on server side');
+    }
+  
+  
+    try {
+      if (!editor) {
+        console.error('Editor not available');
+        return;
+      }
+  
+      const allBlocks = editor.topLevelBlocks;
+      const markdownContent = await editor.blocksToMarkdownLossy(allBlocks);
+  
+      const response = await fetchAPI(`documents/${documentId}/push/`, {
+        method: 'POST',
+        body: JSON.stringify({
+          document_id: documentId,
+          content: markdownContent,
+          document_name: editor?.document?.title || ''
+        }),
+      });
+  
+      if (response.ok) {
+        console.log('Push API call successful', await response.json());
+      } else {
+        console.error('Push API call failed', response.status, await response.text());
+      }
+    } catch (error) {
+      console.error('Error calling Push API', error);
+    }
+  };
+
+  
   useEffect(() => {
     if (modalHistory.isOpen) {
       return;
@@ -58,6 +112,10 @@ export const DocToolBox = ({ doc }: DocToolBoxProps) => {
         $margin={{ left: 'auto' }}
         $gap={spacingsTokens['2xs']}
       >
+        <Button onClick={handlePushClick}>
+          Push
+        </Button>
+
         {!isSmallMobile && (
           <>
             {!hasAccesses && (

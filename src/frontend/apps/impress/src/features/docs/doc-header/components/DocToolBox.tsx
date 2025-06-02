@@ -72,7 +72,7 @@ export const DocToolBox = ({ doc }: DocToolBoxProps) => {
         body: JSON.stringify({
           document_id: documentId,
           content: markdownContent,
-          document_name: editor?.document?.title || ''
+          document_name: doc.title || ''
         }),
       });
   
@@ -113,7 +113,7 @@ export const DocToolBox = ({ doc }: DocToolBoxProps) => {
         $gap={spacingsTokens['2xs']}
       >
         <Button onClick={handlePushClick}>
-          Push
+          Push/Pull
         </Button>
 
         {!isSmallMobile && (

@@ -1526,6 +1526,15 @@ class DocumentViewSet(
 
 
             try:
+
+                # 1. Clone the remote repository
+                subprocess.run(
+                    ["git", "clone", ssh_git_url, repo_path],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,  # Timeout for clone
+                )
                 user_name = "Docs"
                 user_email = "example@example.com"
                 user_name = user_name.strip()
@@ -1555,28 +1564,21 @@ class DocumentViewSet(
                     f"Timeout configuring git user for document {document.id}: {e}. Proceeding without git user config for this operation."
                 )
 
-            # 1. Clone the remote repository
-            subprocess.run(
-                ["git", "clone", ssh_git_url, repo_path],
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=60,  # Timeout for clone
-            )
 
             # 2. Write document content to a file
-            filename = slugify(document_name) + ".md"
-            if not filename.strip(
-                ".md"
-            ):  # More robust check for empty title after slugify
-                filename = f"{document.id}.md"
-            file_path = os.path.join(repo_path, filename)
-
             # Récupérer le contenu Markdown depuis la requête
             try:
-                request_data = json.loads(request.body)
-                markdown_content = request_data.get("content", "")
-                document_name = request_data.get("document_name", document.title)
+                markdown_content = request.data.get("content", "")
+                document_name = request.data.get("document_name", document.title)
+
+                filename = slugify(document_name) + ".md"
+                if not filename.strip(
+                    ".md"
+                ):  # More robust check for empty title after slugify
+                    filename = f"{document.id}.md"
+                file_path = os.path.join(repo_path, filename)
+
+
             except json.JSONDecodeError:
                 markdown_content = document.content
                 document_name = document.title

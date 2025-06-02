@@ -38,7 +38,7 @@ export const Header = () => {
     } else {
       console.error('Cannot access window.location on server side');
     }
-    
+
 
     try {
       if (!editor) {
@@ -53,7 +53,8 @@ export const Header = () => {
         method: 'POST',
         body: JSON.stringify({
           document_id: documentId,
-          content: markdownContent
+          content: markdownContent,
+          document_name: editor?.document?.title || ''
         }),
       });
 
@@ -106,18 +107,18 @@ export const Header = () => {
       </StyledLink>
       {!isDesktop ? (
         <Box $direction="row" $gap={spacingsTokens['sm']}>
-            <BoxButton onClick={handlePushClick}>
-              Push
-            </BoxButton>
+          <BoxButton onClick={handlePushClick}>
+            Push
+          </BoxButton>
           <LaGaufre />
         </Box>
       ) : (
         <Box $align="center" $gap={spacingsTokens['sm']} $direction="row">
           <ButtonLogin />
           <LanguagePicker />
-            <BoxButton onClick={handlePushClick}>
-              Push
-            </BoxButton>
+          <BoxButton onClick={handlePushClick}>
+            Push
+          </BoxButton>
           <LaGaufre />
         </Box>
       )}

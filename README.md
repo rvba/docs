@@ -26,6 +26,8 @@
   </a>
 </p>
 
+# Docs-to-git
+
 # La Suite Docs : Collaborative Text Editing
 Docs, where your notes can become knowledge through live collaboration.
 

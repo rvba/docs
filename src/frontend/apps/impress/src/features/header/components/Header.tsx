@@ -20,23 +20,26 @@ export const Header = () => {
   const { t } = useTranslation();
   const { spacingsTokens, colorsTokens } = useCunninghamTheme();
   const { isDesktop } = useResponsiveStore();
-  const router = useRouter();
-
-  const isDocPage = router.pathname.includes('/doc/');
 
   const handlePushClick = async () => {
     console.log('Push button clicked');
     let documentId = null;
-    if (isDocPage) {
-      const pathSegments = router.asPath.split('/');
-      const docIndex = pathSegments.indexOf('doc');
+    if (typeof window !== 'undefined') {
+      const pathSegments = window.location.pathname.split('/');
+      const docIndex = pathSegments.indexOf('docs');
       if (docIndex !== -1 && docIndex < pathSegments.length - 1) {
         documentId = pathSegments[docIndex + 1];
+        console.log('Extracted documentId from URL:', documentId);
+      } else {
+        console.error('Could not extract documentId from URL:', window.location.pathname);
       }
+    } else {
+      console.error('Cannot access window.location on server side');
     }
+    
 
     try {
-      const response = await fetchAPI(`/documents/${documentId}/`, {
+      const response = await fetchAPI(`documents/${documentId}/push/`, {
         method: 'POST',
         body: JSON.stringify({ document_id: documentId }),
       });
@@ -90,22 +93,18 @@ export const Header = () => {
       </StyledLink>
       {!isDesktop ? (
         <Box $direction="row" $gap={spacingsTokens['sm']}>
-          {!isDocPage && (
             <BoxButton onClick={handlePushClick}>
               Push
             </BoxButton>
-          )}
           <LaGaufre />
         </Box>
       ) : (
         <Box $align="center" $gap={spacingsTokens['sm']} $direction="row">
           <ButtonLogin />
           <LanguagePicker />
-          {!isDocPage && (
             <BoxButton onClick={handlePushClick}>
               Push
             </BoxButton>
-          )}
           <LaGaufre />
         </Box>
       )}

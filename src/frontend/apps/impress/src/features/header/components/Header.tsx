@@ -36,7 +36,7 @@ export const Header = () => {
     }
 
     try {
-      const response = await fetchAPI('/push/', {
+      const response = await fetchAPI(`/documents/${documentId}/`, {
         method: 'POST',
         body: JSON.stringify({ document_id: documentId }),
       });

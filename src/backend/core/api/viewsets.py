@@ -10,6 +10,15 @@ import tempfile
 import uuid
 from urllib.parse import unquote, urlencode, urlparse
 
+
+import json
+import logging
+import os
+import shutil
+import subprocess
+import uuid  # For unique stash messages
+
+
 from django.conf import settings
 from django.contrib.postgres.aggregates import ArrayAgg
 from django.contrib.postgres.fields import ArrayField
@@ -47,6 +56,55 @@ logger = logging.getLogger(__name__)
 
 # pylint: disable=too-many-ancestors
 
+
+# --- GIT HELPER ---
+def _run_git_command(
+    cmd, cwd, timeout=60, check=True, suppress_error_logging=False
+):
+    """
+    Runs a Git command and handles common errors.
+    Returns a tuple (success, stdout, stderr).
+    'success' is True if exit code is 0, False otherwise if check=False.
+    If check=True, non-zero exit codes raise CalledProcessError.
+    """
+    try:
+        process = subprocess.run(
+            cmd,
+            cwd=cwd,
+            check=check,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        return True, process.stdout.strip(), process.stderr.strip()
+    except subprocess.CalledProcessError as e:
+        stderr = e.stderr.strip() if e.stderr else "No stderr output"
+        if not suppress_error_logging:
+            logger.error(
+                f"Git command failed. Command: '{' '.join(e.cmd)}'. Exit Code: {e.returncode}. Stderr: {stderr}"
+            )
+        if (
+            not check
+        ):  # If check is False, we expect to handle non-zero exits manually
+            return False, e.stdout.strip() if e.stdout else "", stderr
+        raise  # Re-raise to be caught by the calling action if check=True
+    except subprocess.TimeoutExpired as e:
+        cmd_str = " ".join(e.cmd) if e.cmd else "Unknown command"
+        if not suppress_error_logging:
+            logger.error(f"Git command timed out: {cmd_str}")
+        raise
+    except FileNotFoundError:
+        if not suppress_error_logging:
+            logger.error(
+                "Git command not found. Ensure Git is installed and in PATH."
+            )
+        raise
+    except Exception as e:
+        if not suppress_error_logging:
+            logger.error(
+                f"An unexpected error occurred running git command: {type(e).__name__} - {str(e)}"
+            )
+        raise
 
 class NestedGenericViewSet(viewsets.GenericViewSet):
     """
@@ -329,8 +387,6 @@ class DocumentMetadata(drf.metadata.SimpleMetadata):
                 ]
             }
         return simple_metadata
-
-
 
 
 # TODO: add push/pull
@@ -1477,189 +1533,407 @@ class DocumentViewSet(
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
-    @drf.decorators.action(
-        detail=True,
-        methods=["post"],
-        name="Push document content to a remote Git repository",
-        url_path="push",
-        # permissions.DocumentAccessPermission,
-        permission_classes=[AllowAny],  # TODO: Remplacer par une permission spécifique
-    )
-    # TODO: Créer une permission PushDocumentPermission qui vérifie que :
-    # - L'utilisateur a au moins un rôle reader sur le document
-    # - Le document n'est pas supprimé
-    def push(self, request, *args, **kwargs):
+  
+    def _ensure_repository_initialized(
+        self, remote_url, repo_path, user_name, user_email
+    ):
         """
-        POST /api/v1.0/documents/<resource_id>/push
-        Push the document content to a remote Git repository via SSH.
-        Uses GIT_PUSH_URL from settings as the target repository.
+        Ensures the repository is cloned and configured.
+        This is called at the beginning of the sync operation.
+        Returns True if successful, raises an exception otherwise.
         """
-        """
-        Push the document content to a remote Git repository via SSH.
-        """
-        document = self.get_object()
-        # Le sérialiseur n'est plus utilisé pour valider ssh_git_url ici.
-        # serializer = self.get_serializer(data=request.data)
-        # serializer.is_valid(raise_exception=True)
-        # ssh_git_url = serializer.validated_data["ssh_git_url"]
-        ssh_git_url = getattr(settings, "GIT_PUSH_URL", None)
+        if os.path.exists(os.path.join(repo_path, ".git")):
+            # Optional: Verify remote URL consistency
+            try:
+                current_remote, _, _ = _run_git_command(
+                    ["git", "remote", "get-url", "origin"], cwd=repo_path, check=False
+                )
+                if current_remote != remote_url:
+                    logger.warning(
+                        f"Remote URL mismatch for {repo_path}. Current: {current_remote}, Expected: {remote_url}. Updating..."
+                    )
+                    _run_git_command(
+                        ["git", "remote", "set-url", "origin", remote_url],
+                        cwd=repo_path,
+                    )
+                # Ensure git user config is set (it's cheap to run)
+                _run_git_command(
+                    ["git", "config", "user.name", user_name], cwd=repo_path, timeout=10
+                )
+                _run_git_command(
+                    ["git", "config", "user.email", user_email],
+                    cwd=repo_path,
+                    timeout=10,
+                )
+                logger.info(f"Repository at {repo_path} already exists and configured.")
+                return True
+            except Exception as e:  # Catching exceptions from _run_git_command
+                logger.error(
+                    f"Error re-configuring existing repository at {repo_path}: {str(e)}"
+                )
+                raise RuntimeError(
+                    f"Failed to re-configure existing repository: {str(e)}"
+                )
 
-        if not ssh_git_url:
-            return drf_response.Response(
-                {"detail": "GIT_PUSH_URL is not configured."},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
-
-        # Ensure the user has the necessary permissions (e.g., owner or admin)
-        # if not document.get_abilities(request.user).get("push", False):
-        #     return drf_response.Response(
-        #         {"detail": "You do not have permission to push this document."},
-        #         status=status.HTTP_403_FORBIDDEN,
-        #     )
-
-        temp_dir = None
+        logger.info(f"Repository not found at {repo_path}. Initializing...")
         try:
-            temp_dir = tempfile.mkdtemp()
-            # Create a subdirectory for the clone to avoid git issues if temp_dir is a repo
-            repo_path = os.path.join(temp_dir, "repo")
-            os.makedirs(repo_path)  # Ensure repo_path is created
-
-
-            try:
-
-                # 1. Clone the remote repository
-                subprocess.run(
-                    ["git", "clone", ssh_git_url, repo_path],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                    timeout=60,  # Timeout for clone
+            os.makedirs(repo_path, exist_ok=True)
+            # Check if repo_path is empty, git clone requires target dir to be empty or not exist
+            if os.listdir(repo_path):
+                # This case should ideally not happen if .git doesn't exist but directory has files.
+                # For safety, we might clear it or error. Let's error for now.
+                # A more robust solution might be to clone to a temp dir then move, or ensure clean state.
+                logger.error(
+                    f"Target repository path {repo_path} exists and is not empty, but not a git repo. Aborting."
                 )
-                user_name = "Docs"
-                user_email = "example@example.com"
-                user_name = user_name.strip()
-                if user_name and user_email:  # Proceed only if both are non-empty
-                    subprocess.run(
-                        ["git", "config", "user.name", user_name],
-                        cwd=repo_path,
-                        check=True,
-                        capture_output=True,
-                        text=True,
-                        timeout=10,
-                    )
-                    subprocess.run(
-                        ["git", "config", "user.email", user_email],
-                        cwd=repo_path,
-                        check=True,
-                        capture_output=True,
-                        text=True,
-                        timeout=10,
-                    )
-            except subprocess.CalledProcessError as e:
-                logger.warning(
-                    f"Failed to configure git user for document {document.id}: {e.stderr}. Proceeding without git user config for this operation."
-                )
-            except subprocess.TimeoutExpired as e:
-                logger.warning(
-                    f"Timeout configuring git user for document {document.id}: {e}. Proceeding without git user config for this operation."
+                raise RuntimeError(
+                    f"Target repository path {repo_path} exists and is not empty, but not a git repo."
                 )
 
-
-            # 2. Write document content to a file
-            # Récupérer le contenu Markdown depuis la requête
-            try:
-                markdown_content = request.data.get("content", "")
-                document_name = request.data.get("document_name", document.title)
-
-                filename = slugify(document_name) + ".md"
-                if not filename.strip(
-                    ".md"
-                ):  # More robust check for empty title after slugify
-                    filename = f"{document.id}.md"
-                file_path = os.path.join(repo_path, filename)
-
-
-            except json.JSONDecodeError:
-                markdown_content = document.content
-                document_name = document.title
-
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.write(markdown_content or "")
-
-            # 3. Git add
-            subprocess.run(
-                ["git", "add", filename],
-                cwd=repo_path,
-                check=True,
-                capture_output=True,
-                text=True,
+            _run_git_command(
+                ["git", "clone", remote_url, repo_path],
+                cwd=os.path.dirname(repo_path) or ".",
+            )  # cwd should be parent
+            _run_git_command(
+                ["git", "config", "user.name", user_name], cwd=repo_path, timeout=10
             )
-
-            # 4. Git commit
-            commit_message = f"Synchronisation du document {document.title}"
-            subprocess.run(
-                ["git", "commit", "-m", commit_message],
-                cwd=repo_path,
-                check=True,
-                capture_output=True,
-                text=True,
+            _run_git_command(
+                ["git", "config", "user.email", user_email], cwd=repo_path, timeout=10
             )
-
-            # 5. Git push
-            subprocess.run(
-                ["git", "push", "origin"],  # Assumes default remote name 'origin'
-                cwd=repo_path,
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=60,  # Timeout for push
+            logger.info(
+                f"Repository cloned and configured successfully at {repo_path}."
             )
-
-            return drf_response.Response(
-                {"detail": "Document pushed successfully."},
-                status=status.HTTP_200_OK,
-            )
-
-        except subprocess.CalledProcessError as e:
-            stderr_output = e.stderr.strip() if e.stderr else "No stderr output"
+            return True
+        except (
+            subprocess.CalledProcessError,
+            subprocess.TimeoutExpired,
+            FileNotFoundError,
+            RuntimeError,
+        ) as e:
             logger.error(
-                f"Git command failed for document {document.id} to {ssh_git_url}. Command: '{' '.join(e.cmd)}'. Stderr: {stderr_output}"
+                f"Failed to initialize repository at {repo_path} from {remote_url}: {str(e)}"
             )
-            error_message = f"Git command failed: {' '.join(e.cmd)}."
-            if e.stderr:  # Append stderr if available
-                error_message += f" Error: {stderr_output}"
-            return drf_response.Response(
-                {"detail": error_message},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
-        except subprocess.TimeoutExpired as e:
-            cmd_str = " ".join(e.cmd) if e.cmd else "Unknown command"
-            logger.error(
-                f"Git command timed out for document {document.id} to {ssh_git_url}: {cmd_str}"
-            )
-            return drf_response.Response(
-                {"detail": f"Git command '{cmd_str}' timed out."},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
-        except FileNotFoundError:  # Specifically catch if git is not found
-            logger.error("Git command not found. Ensure Git is installed and in PATH.")
-            return drf_response.Response(
-                {
-                    "detail": "Git command not found. Ensure Git is installed and in PATH."
-                },
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            # Attempt cleanup if clone might have partially succeeded
+            if os.path.exists(repo_path) and not os.path.join(
+                repo_path, ".git"
+            ):  # if .git is not there, it's likely a failed clone
+                shutil.rmtree(repo_path)
+            raise RuntimeError(
+                f"Git operation failed during repository initialization: {str(e)}"
             )
         except Exception as e:  # Catch-all for other unexpected errors
             logger.error(
-                f"Error pushing document {document.id} to {ssh_git_url}: {type(e).__name__} - {str(e)}"
+                f"Unexpected error initializing repository {repo_path}: {type(e).__name__} - {str(e)}"
+            )
+            if os.path.exists(repo_path) and not os.path.join(repo_path, ".git"):
+                shutil.rmtree(repo_path)
+            raise RuntimeError(
+                f"An unexpected error occurred during repository initialization: {str(e)}"
+            )
+
+    @drf.decorators.action(
+        detail=True,
+        methods=["post"],
+        name="Push/Sync document content to a remote Git repository",
+        url_path="push",  # Keeping 'push' as per original PoC endpoint name
+        permission_classes=[AllowAny],  # TODO: Replace with specific permissions
+    )
+    def push(self, request, *args, **kwargs):  # Renamed to 'push'
+        """
+        POST /api/v1.0/documents/<resource_id>/push
+        Ensures Git repository is initialized, then synchronizes the document content.
+        Handles unclean states and merge conflicts.
+        Requires 'content' (Markdown) and optionally 'document_name' in the request body.
+        """
+        document = self.get_object()
+
+        # --- Configuration ---
+        remote_url = getattr(settings, "GIT_PUSH_URL", None)  # From original PoC
+    # Assuming 'document' is your model and self.get_object() fetches it.
+        # from .models import Document
+
+        # --- GIT CONFIG (Defaults if not in settings, but GIT_LOCAL_REPO_PATH is crucial) ---
+        GIT_DEFAULT_BRANCH = "main"  # Or "master", or fetch from settings if preferred
+        GIT_USER_NAME = "Docs"
+        GIT_USER_EMAIL = "example@example.com"
+        repo_path = getattr(
+            settings, "GIT_LOCAL_REPO_PATH", "tmp-repo"
+        )  # Essential new setting
+
+        if not remote_url:
+            return drf_response.Response(
+                {"detail": "GIT_PUSH_URL is not configured in settings."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+        if not repo_path:
+            return drf_response.Response(
+                {
+                    "detail": "GIT_LOCAL_REPO_PATH is not configured in settings for persistent clone."
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        try:
+            self._ensure_repository_initialized(
+                remote_url, repo_path, GIT_USER_NAME, GIT_USER_EMAIL
+            )
+        except RuntimeError as e:  # Catch initialization specific errors
+            return drf_response.Response(
+                {"detail": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+        except Exception as e:  # Catch any other unexpected init errors
+            logger.critical(
+                f"Unexpected critical error during repository initialization check: {str(e)}"
+            )
+            return drf_response.Response(
+                {"detail": f"Critical error setting up repository: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        markdown_content = request.data.get("content", getattr(document, "content", ""))
+        document_title = request.data.get(
+            "document_name", getattr(document, "title", str(document.id))
+        )
+
+        filename_slug = slugify(document_title)
+        if not filename_slug:
+            filename_slug = str(document.id)
+        filename = f"{filename_slug}.md"  # Filename relative to repo root
+        file_path_in_repo = os.path.join(repo_path, filename)
+
+        stash_created = False
+        stash_name = f"autosync-stash-{uuid.uuid4().hex[:8]}"
+
+        try:
+            logger.info(
+                f"Starting sync for document {document.id} ({filename}) in {repo_path}"
+            )
+
+            # 0. Ensure we are on the correct branch (create if it doesn't exist locally but does on remote)
+            try:
+                _run_git_command(["git", "checkout", GIT_DEFAULT_BRANCH], cwd=repo_path)
+            except subprocess.CalledProcessError:  # If branch doesn't exist locally
+                logger.info(
+                    f"Branch '{GIT_DEFAULT_BRANCH}' not found locally. Attempting to create from 'origin/{GIT_DEFAULT_BRANCH}'."
+                )
+                _run_git_command(
+                    ["git", "fetch", "origin"], cwd=repo_path
+                )  # Ensure remote refs are up-to-date
+                _run_git_command(
+                    [
+                        "git",
+                        "checkout",
+                        "-b",
+                        GIT_DEFAULT_BRANCH,
+                        f"origin/{GIT_DEFAULT_BRANCH}",
+                    ],
+                    cwd=repo_path,
+                )
+            logger.info(f"Switched to branch '{GIT_DEFAULT_BRANCH}'.")
+
+            # 1. Stash local changes
+            _, status_output, _ = _run_git_command(
+                ["git", "status", "--porcelain"],
+                cwd=repo_path,
+                suppress_error_logging=True,
+                check=False,
+            )
+            if (
+                status_output
+            ):  # Non-empty output means there are changes or untracked files
+                logger.info(
+                    f"Unclean Git state. Stashing changes under '{stash_name}'."
+                )
+                _run_git_command(
+                    ["git", "stash", "push", "-u", "-m", stash_name], cwd=repo_path
+                )
+                stash_created = True
+            else:
+                logger.info("Git state is clean. No stash needed.")
+
+            # 2. Fetch remote changes
+            logger.info("Fetching remote changes from 'origin'.")
+            _run_git_command(["git", "fetch", "origin"], cwd=repo_path)
+
+            # 3. Attempt to merge (fast-forward or actual merge)
+            _, local_rev, _ = _run_git_command(
+                ["git", "rev-parse", "HEAD"], cwd=repo_path
+            )
+            _, remote_rev, _ = _run_git_command(
+                ["git", "rev-parse", f"origin/{GIT_DEFAULT_BRANCH}"], cwd=repo_path
+            )
+
+            if local_rev != remote_rev:
+                logger.info(
+                    f"Local branch '{GIT_DEFAULT_BRANCH}' differs from 'origin/{GIT_DEFAULT_BRANCH}'. Attempting merge."
+                )
+                # Use --no-commit to inspect merge if needed, but for automation, direct merge is fine.
+                success, out, err = _run_git_command(
+                    ["git", "merge", f"origin/{GIT_DEFAULT_BRANCH}"],
+                    cwd=repo_path,
+                    check=False,
+                )
+                if not success:
+                    if (
+                        "CONFLICT" in out
+                        or "CONFLICT" in err
+                        or "Automatic merge failed" in out
+                        or "Automatic merge failed" in err
+                    ):
+                        logger.warning(
+                            f"Merge conflict for '{GIT_DEFAULT_BRANCH}'. Aborting merge. Stdout: {out}, Stderr: {err}"
+                        )
+                        _run_git_command(
+                            ["git", "merge", "--abort"], cwd=repo_path, check=False
+                        )  # Abort, don't check=True as it might fail if no merge in progress
+                        return drf_response.Response(
+                            {
+                                "detail": f"Automatic merge failed due to conflicts with remote changes for branch '{GIT_DEFAULT_BRANCH}'. Please resolve conflicts in the repository or pull changes locally and retry sync."
+                            },
+                            status=status.HTTP_409_CONFLICT,
+                        )
+                    else:  # Other merge error
+                        logger.error(
+                            f"Merge failed for a non-conflict reason. Stdout: {out}, Stderr: {err}"
+                        )
+                        raise subprocess.CalledProcessError(
+                            1, ["git", "merge"], output=out, stderr=err
+                        )  # Re-raise as a generic error
+                logger.info("Merge successful.")
+            else:
+                logger.info(
+                    f"Local branch '{GIT_DEFAULT_BRANCH}' is already up-to-date."
+                )
+
+            # 4. Write document content
+            logger.info(f"Writing document content to {file_path_in_repo}.")
+            with open(file_path_in_repo, "w", encoding="utf-8") as f:
+                f.write(markdown_content or "")
+
+            # 5. Git add
+            _run_git_command(["git", "add", filename], cwd=repo_path)
+
+            # 6. Git commit (only if there are actual changes to the file)
+            _, staged_diff_output, _ = _run_git_command(
+                ["git", "diff", "--staged", "--name-only", "--", filename],
+                cwd=repo_path,
+                check=False,
+            )
+            if (
+                not staged_diff_output.strip()
+            ):  # Check if our specific file has staged changes
+                logger.info(
+                    f"No content changes staged for {filename}. Skipping commit and push."
+                )
+                return drf_response.Response(
+                    {
+                        "detail": f"No content changes for {filename}. Document already in sync."
+                    },
+                    status=status.HTTP_200_OK,
+                )
+
+            commit_message = f"Synchronized document: {document_title} ({document.id})"
+            logger.info(
+                f"Committing changes for {filename} with message: '{commit_message}'."
+            )
+            _run_git_command(["git", "commit", "-m", commit_message], cwd=repo_path)
+
+            # 7. Git push
+            logger.info(f"Pushing changes for branch '{GIT_DEFAULT_BRANCH}' to origin.")
+            success, out, err = _run_git_command(
+                ["git", "push", "origin", GIT_DEFAULT_BRANCH],
+                cwd=repo_path,
+                check=False,
+            )
+            if not success:
+                if "non-fast-forward" in err or "Updates were rejected" in err:
+                    logger.warning(
+                        f"Push rejected for '{GIT_DEFAULT_BRANCH}', remote has diverged. Stdout: {out}, Stderr: {err}"
+                    )
+                    return drf_response.Response(
+                        {
+                            "detail": f"Push rejected for {filename}. Remote has new changes. Please try syncing again (this will attempt a new merge)."
+                        },
+                        status=status.HTTP_409_CONFLICT,
+                    )
+                else:  # Other push error
+                    logger.error(f"Push failed. Stdout: {out}, Stderr: {err}")
+                    raise subprocess.CalledProcessError(
+                        1, ["git", "push"], output=out, stderr=err
+                    )
+
+            return drf_response.Response(
+                {
+                    "detail": f"Document {document_title} synced successfully to {filename}."
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        except (
+            subprocess.CalledProcessError,
+            subprocess.TimeoutExpired,
+            FileNotFoundError,
+        ) as e:
+            err_msg = getattr(
+                e, "stderr", str(e)
+            )  # Already logged by _run_git_command if not suppressed
+            return drf_response.Response(
+                {"detail": f"Git operation failed during sync: {err_msg}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+        except Exception as e:
+            logger.error(
+                f"Error syncing document {document.id} ({filename}) to {repo_path}: {type(e).__name__} - {str(e)}"
             )
             return drf_response.Response(
                 {"detail": f"An unexpected error occurred: {str(e)}"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
         finally:
-            if temp_dir and os.path.exists(temp_dir):
-                shutil.rmtree(temp_dir)
+            if stash_created:
+                try:
+                    logger.info(f"Attempting to pop stash: {stash_name}")
+                    # Check if stash exists by name (more robust)
+                    # `git stash list --pretty="%gd %gs"` lists refname and message
+                    stash_list_output, _, _ = _run_git_command(
+                        ["git", "stash", "list", "--pretty=%gd %gs"],
+                        cwd=repo_path,
+                        check=False,
+                    )
+
+                    # Find the specific stash reference (e.g., stash@{0}) by its message
+                    stash_ref_to_pop = None
+                    for line in stash_list_output.splitlines():
+                        if stash_name in line:
+                            stash_ref_to_pop = line.split(" ")[0]  # e.g. stash@{0}
+                            break
+
+                    if stash_ref_to_pop:
+                        pop_success, pop_out, pop_err = _run_git_command(
+                            ["git", "stash", "pop", "--index", stash_ref_to_pop],
+                            cwd=repo_path,
+                            check=False,
+                        )
+                        if not pop_success:
+                            logger.warning(
+                                f"Failed to pop stash '{stash_name}' ({stash_ref_to_pop}) for {repo_path}. Stdout: {pop_out}, Stderr: {pop_err}. "
+                                "This may be due to conflicts. Manual stash management might be needed."
+                            )
+                        else:
+                            logger.info(
+                                f"Successfully popped stash: {stash_name} ({stash_ref_to_pop})"
+                            )
+                    else:
+                        logger.info(
+                            f"Stash '{stash_name}' not found in list or already applied. Skipping pop."
+                        )
+                except (
+                    Exception
+                ) as e_stash_pop:  # Catch any error during stash pop logic
+                    logger.warning(
+                        f"Exception occurred while trying to pop stash '{stash_name}' for {repo_path}: {str(e_stash_pop)}. "
+                        "Manual stash management might be needed."
+                    )
 
 
 class DocumentAccessViewSet(

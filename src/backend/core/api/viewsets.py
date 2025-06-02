@@ -3,6 +3,9 @@
 
 import json
 import logging
+import shutil
+import subprocess
+import tempfile
 import uuid
 from urllib.parse import unquote, urlencode, urlparse
 
@@ -327,6 +330,15 @@ class DocumentMetadata(drf.metadata.SimpleMetadata):
         return simple_metadata
 
 
+class DocumentPushSerializer(serializers.serializers.Serializer):
+    """Serializer for the document push action."""
+
+    # Le champ ssh_git_url n'est plus attendu ici,
+    # il sera récupéré depuis settings.GIT_PUSH_DEFAULT_SSH_URL.
+    pass
+
+
+# TODO: add push/pull
 # pylint: disable=too-many-public-methods
 class DocumentViewSet(
     SerializerPerActionMixin,
@@ -435,6 +447,7 @@ class DocumentViewSet(
     ]
     queryset = models.Document.objects.all()
     serializer_class = serializers.DocumentSerializer
+    push_serializer_class = DocumentPushSerializer  # Add serializer for push action
     ai_translate_serializer_class = serializers.AITranslateSerializer
     children_serializer_class = serializers.ListDocumentSerializer
     descendants_serializer_class = serializers.ListDocumentSerializer
@@ -700,6 +713,11 @@ class DocumentViewSet(
         return drf_response.Response(
             {"id": str(document.id)}, status=status.HTTP_201_CREATED
         )
+    
+    # /0/.../...
+
+
+    # Content: doc yjs en base64
 
     @drf.decorators.action(detail=True, methods=["post"])
     @transaction.atomic
@@ -1465,6 +1483,174 @@ class DocumentViewSet(
                 {"error": f"Failed to fetch resource: {e!s}"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
+
+    # TODO: Implémenter la logique de clonage initial mock/détaillée si nécessaire
+    @drf.decorators.action(detail=True, methods=["post"], url_path="push")
+    def push(self, request, *args, **kwargs):
+        """
+        Push the document content to a remote Git repository via SSH.
+        """
+        document = self.get_object()
+        # Le sérialiseur n'est plus utilisé pour valider ssh_git_url ici.
+        # serializer = self.get_serializer(data=request.data)
+        # serializer.is_valid(raise_exception=True)
+        # ssh_git_url = serializer.validated_data["ssh_git_url"]
+        ssh_git_url = getattr(settings, "GIT_PUSH_DEFAULT_SSH_URL", None)
+
+        if not ssh_git_url:
+            return drf_response.Response(
+                {"detail": "GIT_PUSH_DEFAULT_SSH_URL is not configured."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        # Ensure the user has the necessary permissions (e.g., owner or admin)
+        if not document.get_abilities(request.user).get("push", False):
+            return drf_response.Response(
+                {"detail": "You do not have permission to push this document."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        temp_dir = None
+        try:
+            temp_dir = tempfile.mkdtemp()
+            # Create a subdirectory for the clone to avoid git issues if temp_dir is a repo
+            repo_path = os.path.join(temp_dir, "repo")
+            os.makedirs(repo_path) # Ensure repo_path is created
+
+            # Configure Git user if specified in settings
+            git_user_login = getattr(settings, "GIT_PUSH_SSH_USER_LOGIN", None)
+            if git_user_login:
+                try:
+                    user_name, user_email = git_user_login.split("<", 1)
+                    user_email = user_email.rstrip(">").strip()
+                    user_name = user_name.strip()
+                    if user_name and user_email: # Proceed only if both are non-empty
+                        subprocess.run(
+                            ["git", "config", "user.name", user_name],
+                            cwd=repo_path,
+                            check=True,
+                            capture_output=True,
+                            text=True,
+                            timeout=10,
+                        )
+                        subprocess.run(
+                            ["git", "config", "user.email", user_email],
+                            cwd=repo_path,
+                            check=True,
+                            capture_output=True,
+                            text=True,
+                            timeout=10,
+                        )
+                except ValueError:
+                    logger.warning(
+                        f"Invalid GIT_PUSH_SSH_USER_LOGIN format for document {document.id}. Expected 'Name <email@example.com>'. Proceeding without git user config for this operation."
+                    )
+                except subprocess.CalledProcessError as e:
+                    logger.warning(
+                        f"Failed to configure git user for document {document.id}: {e.stderr}. Proceeding without git user config for this operation."
+                    )
+                except subprocess.TimeoutExpired as e:
+                    logger.warning(
+                        f"Timeout configuring git user for document {document.id}: {e}. Proceeding without git user config for this operation."
+                    )
+
+            # 1. Clone the remote repository
+            subprocess.run(
+                ["git", "clone", ssh_git_url, repo_path],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=60, # Timeout for clone
+            )
+
+            # 2. Write document content to a file
+            filename = slugify(document.title) + ".md"
+            if not filename.strip(".md"): # More robust check for empty title after slugify
+                filename = f"{document.id}.md"
+            file_path = os.path.join(repo_path, filename)
+
+            # TODO: Convertir document.content (Yjs CRDT) en Markdown
+            # Le contenu Yjs est dans document.content (probablement en base64)
+            # Il faut appeler l'API de conversion (voir src/frontend/servers/y-provider/src/handlers/convertMarkdownHandler.ts)
+            # pour obtenir le contenu Markdown.
+            # Pour l'instant, nous utilisons le contenu brut, ce qui est incorrect.
+            markdown_content = document.content # Placeholder - CECI DOIT ÊTRE REMPLACÉ PAR LE MARKDOWN CONVERTI
+
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(markdown_content or "")
+
+            # 3. Git add
+            subprocess.run(
+                ["git", "add", filename],
+                cwd=repo_path,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            # 4. Git commit
+            commit_message = f"Synchronisation du document {document.title}"
+            subprocess.run(
+                ["git", "commit", "-m", commit_message],
+                cwd=repo_path,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            # 5. Git push
+            subprocess.run(
+                ["git", "push", "origin"], # Assumes default remote name 'origin'
+                cwd=repo_path,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=60, # Timeout for push
+            )
+
+            return drf_response.Response(
+                {"detail": "Document pushed successfully."},
+                status=status.HTTP_200_OK,
+            )
+
+        except subprocess.CalledProcessError as e:
+            stderr_output = e.stderr.strip() if e.stderr else "No stderr output"
+            logger.error(
+                f"Git command failed for document {document.id} to {ssh_git_url}. Command: '{' '.join(e.cmd)}'. Stderr: {stderr_output}"
+            )
+            error_message = f"Git command failed: {' '.join(e.cmd)}."
+            if e.stderr: # Append stderr if available
+                error_message += f" Error: {stderr_output}"
+            return drf_response.Response(
+                {"detail": error_message},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+        except subprocess.TimeoutExpired as e:
+            cmd_str = ' '.join(e.cmd) if e.cmd else "Unknown command"
+            logger.error(
+                f"Git command timed out for document {document.id} to {ssh_git_url}: {cmd_str}"
+            )
+            return drf_response.Response(
+                {"detail": f"Git command '{cmd_str}' timed out."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+        except FileNotFoundError: # Specifically catch if git is not found
+            logger.error("Git command not found. Ensure Git is installed and in PATH.")
+            return drf_response.Response(
+                {"detail": "Git command not found. Ensure Git is installed and in PATH."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+        except Exception as e: # Catch-all for other unexpected errors
+            logger.error(
+                f"Error pushing document {document.id} to {ssh_git_url}: {type(e).__name__} - {str(e)}"
+            )
+            return drf_response.Response(
+                {"detail": f"An unexpected error occurred: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+        finally:
+            if temp_dir and os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir)
 
 
 class DocumentAccessViewSet(

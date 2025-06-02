@@ -419,6 +419,14 @@ class Base(Configuration):
         environ_prefix=None,
     )
 
+    # Git Push SSH
+    GIT_PUSH_DEFAULT_SSH_URL = values.Value(
+        "", environ_name="GIT_PUSH_DEFAULT_SSH_URL", environ_prefix=None
+    )
+    GIT_PUSH_SSH_USER_LOGIN = values.Value(
+        None, environ_name="GIT_PUSH_SSH_USER_LOGIN", environ_prefix=None
+    )
+
     # Frontend
     FRONTEND_THEME = values.Value(
         None, environ_name="FRONTEND_THEME", environ_prefix=None

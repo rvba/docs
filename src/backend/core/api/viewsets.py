@@ -1565,21 +1565,21 @@ class DocumentViewSet(
             )
 
             # 2. Write document content to a file
-            filename = slugify(document.title) + ".md"
+            filename = slugify(document_name) + ".md"
             if not filename.strip(
                 ".md"
             ):  # More robust check for empty title after slugify
                 filename = f"{document.id}.md"
             file_path = os.path.join(repo_path, filename)
 
-            # TODO: Convertir document.content (Yjs CRDT) en Markdown
-            # Le contenu Yjs est dans document.content (probablement en base64)
-            # Il faut appeler l'API de conversion (voir src/frontend/servers/y-provider/src/handlers/convertMarkdownHandler.ts)
-            # pour obtenir le contenu Markdown.
-            # Pour l'instant, nous utilisons le contenu brut, ce qui est incorrect.
-            markdown_content = (
-                document.content
-            )  # Placeholder - CECI DOIT ÊTRE REMPLACÉ PAR LE MARKDOWN CONVERTI
+            # Récupérer le contenu Markdown depuis la requête
+            try:
+                request_data = json.loads(request.body)
+                markdown_content = request_data.get("content", "")
+                document_name = request_data.get("document_name", document.title)
+            except json.JSONDecodeError:
+                markdown_content = document.content
+                document_name = document.title
 
             with open(file_path, "w", encoding="utf-8") as f:
                 f.write(markdown_content or "")

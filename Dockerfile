@@ -73,6 +73,7 @@ ENV PYTHONUNBUFFERED=1
 # Install required system libs
 RUN apk add \
   cairo \
+  git \
   file \
   font-noto \
   font-noto-emoji \

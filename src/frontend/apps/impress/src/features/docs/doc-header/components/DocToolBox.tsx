@@ -113,7 +113,7 @@ export const DocToolBox = ({ doc }: DocToolBoxProps) => {
         $gap={spacingsTokens['2xs']}
       >
         <Button onClick={handlePushClick}>
-          Push/Pull
+          Sync to Git
         </Button>
 
         {!isSmallMobile && (

@@ -1,4 +1,5 @@
 import { useTranslation } from 'react-i18next';
+import { useEditorStore } from '@/features/docs/doc-editor/stores';
 import { css } from 'styled-components';
 import { useRouter } from 'next/router';
 
@@ -20,6 +21,7 @@ export const Header = () => {
   const { t } = useTranslation();
   const { spacingsTokens, colorsTokens } = useCunninghamTheme();
   const { isDesktop } = useResponsiveStore();
+  const { editor } = useEditorStore();
 
   const handlePushClick = async () => {
     console.log('Push button clicked');
@@ -39,9 +41,20 @@ export const Header = () => {
     
 
     try {
+      if (!editor) {
+        console.error('Editor not available');
+        return;
+      }
+
+      const allBlocks = editor.topLevelBlocks;
+      const markdownContent = await editor.blocksToMarkdownLossy(allBlocks);
+
       const response = await fetchAPI(`documents/${documentId}/push/`, {
         method: 'POST',
-        body: JSON.stringify({ document_id: documentId }),
+        body: JSON.stringify({
+          document_id: documentId,
+          content: markdownContent
+        }),
       });
 
       if (response.ok) {

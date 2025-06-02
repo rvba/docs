@@ -1484,9 +1484,19 @@ class DocumentViewSet(
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
-    # TODO: Implémenter la logique de clonage initial mock/détaillée si nécessaire
-    @drf.decorators.action(detail=True, methods=["post"], url_path="push")
+    @drf.decorators.action(
+        detail=True,
+        methods=["post"],
+        name="Push document content to a remote Git repository",
+        url_path="push",
+        throttle_classes=[utils.AIDocumentRateThrottle, utils.AIUserRateThrottle],
+    )
     def push(self, request, *args, **kwargs):
+        """
+        POST /api/v1.0/documents/<resource_id>/push
+        Push the document content to a remote Git repository via SSH.
+        Uses GIT_PUSH_DEFAULT_SSH_URL from settings as the target repository.
+        """
         """
         Push the document content to a remote Git repository via SSH.
         """

@@ -2,10 +2,13 @@
 
 ## Docs-to-Git
 
+* Original idea : **[Docs - Integration with Forgejo](https://github.com/suitenumerique/hackdays2025/issues/82])**
+
 * [TODO](todo.md)
-* [viewsets.py](https://github.com/rvba/docs/blob/docs-to-git/src/backend/core/api/viewsets.py)
-* [settings](https://github.com/rvba/docs/blob/docs-to-git/src/backend/impress/settings.py)
+* [viewsets.py](src/backend/core/api/viewsets.py)
+* [settings](src/backend/impress/settings.py)
 * [DocToolBox.tsx](src/frontend/apps/impress/src/features/docs/doc-header/components/DocToolBox.tsx)
+* [Header.tsx](src/features/header/components/Header.tsx)
 
 ## La Suite
 

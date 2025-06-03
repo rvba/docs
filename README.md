@@ -1,4 +1,6 @@
-# Hackdays
+# [HackDays](https://www.numerique.gouv.fr/agenda/hack-days-hackathon-ia-digital-workspace/) 2025
+
+![](https://raw.githubusercontent.com/suitenumerique/.github/main/assets/banner-hack-days.jpeg)
 
 ## Docs-to-Git
 

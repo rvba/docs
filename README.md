@@ -7,6 +7,10 @@
 ### Push and Pull Docs Markdown content to Git
 
 * Original idea : **[Docs - Integration with Forgejo](https://github.com/suitenumerique/hackdays2025/issues/82)**
+* Use cases :
+  * **Docs to Git** : Collaborative documentation drafting for software repos
+  * **Docs to CI/CD** : Static web site from *plain* documents (e.g. from ``.docx``)
+  * **Docs to Wiki** : Git-based Wikis from live editor
 
 ### Files
 

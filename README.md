@@ -6,7 +6,7 @@
 
 ### Push and Pull Docs Markdown content to Git
 
-* Original idea : **[Docs - Integration with Forgejo](https://github.com/suitenumerique/hackdays2025/issues/82])**
+* Original idea : **[Docs - Integration with Forgejo](https://github.com/suitenumerique/hackdays2025/issues/82)**
 
 ### Files
 
